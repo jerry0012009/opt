@@ -529,7 +529,7 @@ function pageHtml() {
     };
 
     refresh();
-    setInterval(refresh, 8000);
+    setInterval(refresh, 30000);
   </script>
 </body>
 </html>`;

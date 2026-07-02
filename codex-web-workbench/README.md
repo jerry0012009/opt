@@ -27,8 +27,8 @@ Local ports:
 
 Terminal stability defaults:
 
-- ttyd uses `--ping-interval 300` so transient browser/network stalls are not
-  judged dead after only a few seconds.
+- ttyd uses `--ping-interval 2` so the websocket stays active even on
+  short-idle browser/network paths.
 - ttyd allows up to 16 clients because delayed close detection can leave stale
   websocket clients around briefly.
 
