@@ -25,6 +25,13 @@ Local ports:
 - `127.0.0.1:18081` - ttyd.
 - `127.0.0.1:18082` - mobile terminal control page.
 
+Terminal stability defaults:
+
+- ttyd uses `--ping-interval 300` so transient browser/network stalls are not
+  judged dead after only a few seconds.
+- ttyd allows up to 16 clients because delayed close detection can leave stale
+  websocket clients around briefly.
+
 Operational commands:
 
 ```bash
