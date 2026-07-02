@@ -1,0 +1,6 @@
+bind-addr: 127.0.0.1:18080
+auth: password
+password: "__CODE_SERVER_PASSWORD__"
+cert: false
+disable-telemetry: true
+disable-update-check: true

@@ -1,0 +1,5 @@
+codex-web-workbench/secrets/
+codex-web-workbench/logs/
+*.local
+node_modules/
+.DS_Store

@@ -1,0 +1,16 @@
+[Unit]
+Description=Persistent root tmux shell for web workbench
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Environment=WORKBENCH_TMUX_SESSION=codex-workbench
+Environment=WORKBENCH_WORKDIR=/root/jerry
+Environment=WORKBENCH_SHELL_COMMAND=/bin/bash -l
+ExecStart=/root/jerry/opt/codex-web-workbench/bin/ensure-workbench-tmux.sh
+ExecStop=/usr/bin/tmux kill-session -t codex-workbench
+
+[Install]
+WantedBy=multi-user.target

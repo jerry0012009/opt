@@ -1,0 +1,21 @@
+[Unit]
+Description=Codex Workbench mobile terminal control server
+After=network.target codex-tmux.service
+Requires=codex-tmux.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jerry/opt/codex-web-workbench
+Environment=WORKBENCH_CONTROL_HOST=127.0.0.1
+Environment=WORKBENCH_CONTROL_PORT=18082
+Environment=WORKBENCH_CONTROL_BASE_PATH=/codex/terminal
+Environment=WORKBENCH_TTYD_PATH=/codex/ttyd
+Environment=WORKBENCH_TMUX_SESSION=codex-workbench
+Environment=WORKBENCH_WORKDIR=/root/jerry
+ExecStart=/usr/bin/node /root/jerry/opt/codex-web-workbench/bin/workbench-control-server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

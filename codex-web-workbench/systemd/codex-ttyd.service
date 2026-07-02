@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex Workbench ttyd root terminal
+After=network.target codex-tmux.service
+Requires=codex-tmux.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jerry
+Environment=WORKBENCH_TMUX_SESSION=codex-workbench
+ExecStartPre=/root/jerry/opt/codex-web-workbench/bin/ensure-workbench-tmux.sh
+ExecStart=/usr/bin/ttyd --interface 127.0.0.1 --port 18081 --base-path /codex/ttyd --writable --max-clients 8 --auth-header X-Remote-User --client-option fontSize=16 --client-option cursorBlink=true --client-option disableLeaveAlert=true /usr/bin/tmux attach-session -t codex-workbench
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

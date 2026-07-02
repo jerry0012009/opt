@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex Workbench code-server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jerry
+EnvironmentFile=/root/jerry/opt/codex-web-workbench/secrets/secrets.env
+Environment=CODE_SERVER_COOKIE_SUFFIX=codex-workbench
+ExecStart=/usr/bin/code-server --bind-addr 127.0.0.1:18080 --auth password --disable-telemetry --disable-update-check --disable-workspace-trust /root/jerry
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
