@@ -477,8 +477,8 @@ function pageHtml() {
 
       <section class="terminal-nav" aria-label="Terminal navigation">
         <span class="nav-label">scroll</span>
-        <button type="button" data-navigation="scroll_up" title="Scroll up 12 lines" aria-label="Scroll up 12 lines">▲ 12</button>
-        <button type="button" data-navigation="scroll_down" title="Scroll down 12 lines" aria-label="Scroll down 12 lines">▼ 12</button>
+        <button type="button" data-navigation="scroll_up" title="Scroll up 24 lines" aria-label="Scroll up 24 lines">▲ 24</button>
+        <button type="button" data-navigation="scroll_down" title="Scroll down 24 lines" aria-label="Scroll down 24 lines">▼ 24</button>
         <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
       </section>
     </section>
@@ -983,7 +983,7 @@ async function handle(req, res) {
                   'send-keys',
                   '-X',
                   '-N',
-                  '12',
+                  '24',
                   '-t',
                   `${target}:.`,
                   'scroll-up',
@@ -997,7 +997,7 @@ async function handle(req, res) {
             'send-keys',
             '-X',
             '-N',
-            '12',
+            '24',
             '-t',
             `${target}:.`,
             action === 'scroll_up' ? 'scroll-up' : 'scroll-down',
