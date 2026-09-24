@@ -4,6 +4,7 @@
 const http = require('http');
 const { execFile, spawn } = require('child_process');
 const crypto = require('crypto');
+const os = require('os');
 const { URL } = require('url');
 
 const HOST = process.env.WORKBENCH_CONTROL_HOST || '127.0.0.1';
@@ -55,6 +56,31 @@ function run(command, args, options = {}) {
       });
     });
   });
+}
+
+function clampPercent(value) {
+  return Math.round(Math.max(0, Math.min(100, value)));
+}
+
+async function getResourceUsage() {
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const disk = await run('df', ['-P', '-k', '/'], { timeout: 5000 });
+  let diskUsedPercent = null;
+
+  if (disk.ok) {
+    const lines = disk.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const fields = lines.length ? lines[lines.length - 1].trim().split(/\s+/) : [];
+    const match = String(fields[4] || '').match(/^(\d+)%$/);
+    if (match) diskUsedPercent = clampPercent(Number(match[1]));
+  }
+
+  return {
+    diskUsedPercent,
+    memoryUsedPercent: totalMemory > 0
+      ? clampPercent(((totalMemory - freeMemory) / totalMemory) * 100)
+      : null,
+  };
 }
 
 function readBody(req) {
@@ -337,10 +363,14 @@ function pageHtml() {
     pre { min-height: 180px; height: min(60vh, 576px); max-height: 576px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: #d9e2ea; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 9px; color: var(--muted); font-size: 13px; }
     .drop.active { border-color: var(--accent); color: var(--text); }
+    .status-group { min-width: 0; text-align: right; }
+    .resources { color: #74818d; font-size: 12px; white-space: nowrap; }
     summary { list-style: none; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
     @media (max-width: 760px) {
       header { position: static; align-items: flex-start; flex-direction: column; }
+      .status-group { width: 100%; text-align: left; }
+      .resources { white-space: normal; }
       main { padding: 8px; }
       .terminal-frame { height: clamp(560px, 100dvh, 760px); min-height: 560px; border-radius: 6px; }
       .controls-wrapper { display: block; }
@@ -387,7 +417,10 @@ function pageHtml() {
 <body>
   <header>
     <h1>Server Terminal</h1>
-    <div class="status" id="status">Checking session...</div>
+    <div class="status-group">
+      <div class="status" id="status">Checking session...</div>
+      <div class="resources" id="resources" aria-live="polite">Checking resources...</div>
+    </div>
   </header>
   <main>
     <nav class="links">
@@ -704,12 +737,20 @@ function pageHtml() {
       }
     }
 
+    function formatResources(resources) {
+      const parts = [];
+      if (Number.isFinite(resources?.diskUsedPercent)) parts.push('Disk ' + resources.diskUsedPercent + '%');
+      if (Number.isFinite(resources?.memoryUsedPercent)) parts.push('RAM ' + resources.memoryUsedPercent + '%');
+      return parts.length ? parts.join(' · ') : 'Resource data unavailable';
+    }
+
     function applyStatus(data) {
       const current = data.currentWindow || (Array.isArray(data.windows) ? data.windows.find((window) => window.active) : null);
       const windows = Array.isArray(data.windows) ? data.windows : [];
       $('status').textContent = data.running
         ? 'tmux: ' + data.session + (current ? ' · #' + current.index + ' ' + current.name + ' · ' + current.statusLabel : '')
         : 'tmux: not running';
+      if (data.resources) $('resources').textContent = formatResources(data.resources);
       $('capture').textContent = data.capture || '';
       renderTabs(windows);
       $('killPane').disabled = !current || Number(current.panes || 0) < 2;
@@ -917,10 +958,12 @@ async function handle(req, res) {
       const viewId = requestViewId(url);
       const target = running ? await resolveViewSession(viewId) : SESSION;
       const windows = running ? await listWindows(target) : [];
+      const resources = await getResourceUsage();
       sendJson(res, 200, {
         session: SESSION,
         viewSession: target,
         running,
+        resources,
         capture: running ? await capturePane(target, CAPTURE_LINES) : '',
         windows,
         currentWindow: windows.find((window) => window.active) || null,
