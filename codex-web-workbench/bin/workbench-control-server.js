@@ -332,7 +332,7 @@ function pageHtml() {
     .controls-wrapper > .history-panel { grid-column: 2; grid-row: 1; margin-top: 0; }
     .controls-wrapper > .more-controls .input-panel { grid-column: 1; grid-row: 1; }
     .controls-wrapper > .more-controls > .more-controls-content > .buttons,
-    .controls-wrapper > .more-controls > .more-controls-content > .terminal-nav { grid-column: 1 / -1; }
+    .controls-wrapper > .terminal-nav { grid-column: 1 / -1; }
     .input-panel { margin-top: 0; }
     pre { min-height: 180px; height: min(60vh, 576px); max-height: 576px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: #d9e2ea; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 9px; color: var(--muted); font-size: 13px; }
@@ -373,6 +373,10 @@ function pageHtml() {
       a, button { flex: 1 1 calc(33.333% - 8px); min-height: 44px; padding-left: 8px; padding-right: 8px; }
       textarea { min-height: 170px; }
       pre { height: min(52vh, 480px); max-height: 480px; }
+      .controls-wrapper { display: flex; flex-direction: column; }
+      .controls-wrapper > .terminal-nav { order: 1; margin-bottom: 2px; }
+      .controls-wrapper > .history-panel { order: 2; }
+      .controls-wrapper > .more-controls { order: 3; }
       .more-controls { margin-top: 10px; }
     }
     @media (max-width: 420px) {
@@ -468,14 +472,15 @@ function pageHtml() {
             <button data-key="C-a">Ctrl+A</button>
             <button data-key="C-e">Ctrl+E</button>
           </section>
-          <section class="terminal-nav" aria-label="Terminal navigation">
-            <span class="nav-label">scroll</span>
-            <button type="button" data-navigation="scroll_up" title="Scroll up 5 lines" aria-label="Scroll up 5 lines">▲ 5</button>
-            <button type="button" data-navigation="scroll_down" title="Scroll down 5 lines" aria-label="Scroll down 5 lines">▼ 5</button>
-            <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
-          </section>
         </div>
       </details>
+
+      <section class="terminal-nav" aria-label="Terminal navigation">
+        <span class="nav-label">scroll</span>
+        <button type="button" data-navigation="scroll_up" title="Scroll up 5 lines" aria-label="Scroll up 5 lines">▲ 5</button>
+        <button type="button" data-navigation="scroll_down" title="Scroll down 5 lines" aria-label="Scroll down 5 lines">▼ 5</button>
+        <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
+      </section>
     </section>
   </main>
   <script>
