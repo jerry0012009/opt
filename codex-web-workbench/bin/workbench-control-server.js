@@ -340,7 +340,7 @@ function pageHtml() {
     summary { list-style: none; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
     @media (max-width: 760px) {
-      header { align-items: flex-start; flex-direction: column; }
+      header { position: static; align-items: flex-start; flex-direction: column; }
       main { padding: 8px; }
       .terminal-frame { height: clamp(560px, 100dvh, 760px); min-height: 560px; border-radius: 6px; }
       .controls-wrapper { display: block; }
