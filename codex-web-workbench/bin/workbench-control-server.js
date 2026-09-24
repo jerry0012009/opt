@@ -15,6 +15,7 @@ const VIEW_SESSION_PREFIX = process.env.WORKBENCH_VIEW_SESSION_PREFIX || `${SESS
 const VIEW_TTL_MS = Number(process.env.WORKBENCH_VIEW_TTL_MS || 30 * 60 * 1000);
 const ENSURE_SCRIPT = process.env.WORKBENCH_ENSURE_SCRIPT || '/root/jerry/opt/codex-web-workbench/bin/ensure-workbench-tmux.sh';
 const MAX_TEXT_BYTES = Number(process.env.WORKBENCH_CONTROL_MAX_TEXT_BYTES || 65536);
+const CAPTURE_LINES = Number(process.env.WORKBENCH_CAPTURE_LINES || 4000);
 const VIEW_ID_PATTERN = /^[a-f0-9]{32}$/;
 const viewLastSeen = new Map();
 
@@ -327,7 +328,12 @@ function pageHtml() {
     .window-tools { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(4, auto); gap: 8px; align-items: center; }
     .window-more, .window-more-items, .nav-more, .nav-more-items, .more-controls, .more-controls-content { display: contents; }
     .window-more > summary, .nav-more > summary, .more-controls > summary { display: none; }
-    .split { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 10px; align-items: start; }
+    .controls-wrapper { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 10px; align-items: start; }
+    .controls-wrapper > .history-panel { grid-column: 2; grid-row: 1; margin-top: 0; }
+    .controls-wrapper > .more-controls .input-panel { grid-column: 1; grid-row: 1; }
+    .controls-wrapper > .more-controls > .more-controls-content > .buttons,
+    .controls-wrapper > .more-controls > .more-controls-content > .terminal-nav { grid-column: 1 / -1; }
+    .input-panel { margin-top: 0; }
     pre { min-height: 180px; height: min(60vh, 576px); max-height: 576px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: #d9e2ea; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 9px; color: var(--muted); font-size: 13px; }
     .drop.active { border-color: var(--accent); color: var(--text); }
@@ -336,8 +342,9 @@ function pageHtml() {
     @media (max-width: 760px) {
       header { align-items: flex-start; flex-direction: column; }
       main { padding: 8px; }
-      .terminal-frame { height: clamp(320px, calc(100dvh - 310px), 560px); min-height: 320px; border-radius: 6px; }
-      .split { grid-template-columns: 1fr; }
+      .terminal-frame { height: clamp(560px, 100dvh, 760px); min-height: 560px; border-radius: 6px; }
+      .controls-wrapper { display: block; }
+      .controls-wrapper > .history-panel { margin-top: 10px; }
       .nav-more, .window-more, .more-controls { display: block; }
       .nav-more { flex: 1 1 calc(50% - 8px); min-width: 0; }
       .nav-more > summary, .window-more > summary, .more-controls > summary {
@@ -410,65 +417,66 @@ function pageHtml() {
       <iframe id="terminal" name="workbench-terminal" src="about:blank" title="Terminal"></iframe>
     </section>
 
-    <details class="more-controls" open data-mobile-collapse>
-      <summary>More controls</summary>
-      <div class="more-controls-content">
-        <section class="split">
-          <div>
+    <section class="controls-wrapper">
+      <section class="history-panel">
+        <label for="capture">Recent output</label>
+        <pre id="capture"></pre>
+      </section>
+
+      <details class="more-controls" open data-mobile-collapse>
+        <summary>More controls</summary>
+        <div class="more-controls-content">
+          <section class="input-panel">
             <label for="prompt">Input</label>
             <textarea id="prompt" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Type or paste text..."></textarea>
             <div class="drop" id="drop">Drop a text file here.</div>
-          </div>
-          <div>
-            <label for="capture">Recent output</label>
-            <pre id="capture"></pre>
-          </div>
-        </section>
+          </section>
 
-        <section class="buttons">
-          <button class="primary" id="sendEnter">Send + Enter</button>
-          <button id="sendOnly">Paste Only</button>
-          <button id="pasteClipboard">Paste Clipboard</button>
-          <button id="copyOutput">Copy Output</button>
-          <button id="clearBox">Clear Box</button>
-        </section>
+          <section class="buttons">
+            <button class="primary" id="sendEnter">Send + Enter</button>
+            <button id="sendOnly">Paste Only</button>
+            <button id="pasteClipboard">Paste Clipboard</button>
+            <button id="copyOutput">Copy Output</button>
+            <button id="clearBox">Clear Box</button>
+          </section>
 
-        <section class="buttons">
-          <button data-text="codex" data-enter="true">codex</button>
-          <button data-text="codex-lu" data-enter="true">codex-lu</button>
-          <button data-text="codex-mi-1" data-enter="true">codex-mi-1</button>
-          <button data-text="clear" data-enter="true">clear</button>
-          <button id="startSession">Start Shell</button>
-          <button id="refresh">Refresh</button>
-          <button id="killPane" class="danger compact-action">Close Pane</button>
-          <button id="killWindow" class="danger compact-action">Close Window</button>
-        </section>
+          <section class="buttons">
+            <button data-text="codex" data-enter="true">codex</button>
+            <button data-text="codex-lu" data-enter="true">codex-lu</button>
+            <button data-text="codex-mi-1" data-enter="true">codex-mi-1</button>
+            <button data-text="clear" data-enter="true">clear</button>
+            <button id="startSession">Start Shell</button>
+            <button id="refresh">Refresh</button>
+            <button id="killPane" class="danger compact-action">Close Pane</button>
+            <button id="killWindow" class="danger compact-action">Close Window</button>
+          </section>
 
-        <section class="buttons">
-          <button data-key="Enter">Enter</button>
-          <button data-key="Tab">Tab</button>
-          <button data-key="Escape">Esc</button>
-          <button data-key="Up">Up</button>
-          <button data-key="Down">Down</button>
-          <button data-key="Left">Left</button>
-          <button data-key="Right">Right</button>
-          <button data-key="C-c" class="danger">Ctrl+C</button>
-          <button data-key="C-d" class="danger">Ctrl+D</button>
-          <button data-key="C-l">Ctrl+L</button>
-          <button data-key="C-r">Ctrl+R</button>
-          <button data-key="C-u">Ctrl+U</button>
-          <button data-key="C-w">Ctrl+W</button>
-          <button data-key="C-a">Ctrl+A</button>
-          <button data-key="C-e">Ctrl+E</button>
-        </section>
-        <section class="terminal-nav" aria-label="Terminal navigation">
-          <span class="nav-label">scroll</span>
-          <button type="button" data-navigation="scroll_up" title="Scroll up 5 lines" aria-label="Scroll up 5 lines">▲ 5</button>
-          <button type="button" data-navigation="scroll_down" title="Scroll down 5 lines" aria-label="Scroll down 5 lines">▼ 5</button>
-          <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
-        </section>
-      </div>
-    </details>
+          <section class="buttons">
+            <button data-key="Enter">Enter</button>
+            <button data-key="Tab">Tab</button>
+            <button data-key="Escape">Esc</button>
+            <button data-key="Up">Up</button>
+            <button data-key="Down">Down</button>
+            <button data-key="Left">Left</button>
+            <button data-key="Right">Right</button>
+            <button data-key="C-c" class="danger">Ctrl+C</button>
+            <button data-key="C-d" class="danger">Ctrl+D</button>
+            <button data-key="C-l">Ctrl+L</button>
+            <button data-key="C-r">Ctrl+R</button>
+            <button data-key="C-u">Ctrl+U</button>
+            <button data-key="C-w">Ctrl+W</button>
+            <button data-key="C-a">Ctrl+A</button>
+            <button data-key="C-e">Ctrl+E</button>
+          </section>
+          <section class="terminal-nav" aria-label="Terminal navigation">
+            <span class="nav-label">scroll</span>
+            <button type="button" data-navigation="scroll_up" title="Scroll up 5 lines" aria-label="Scroll up 5 lines">▲ 5</button>
+            <button type="button" data-navigation="scroll_down" title="Scroll down 5 lines" aria-label="Scroll down 5 lines">▼ 5</button>
+            <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
+          </section>
+        </div>
+      </details>
+    </section>
   </main>
   <script>
     const base = ${JSON.stringify(BASE_PATH)};
@@ -590,6 +598,13 @@ function pageHtml() {
         });
         mobileInput.engaged = false;
         unlockTerminalHeight('blur');
+      }, true);
+      terminalDocument.addEventListener('keydown', (event) => {
+        if (!isXtermInput(event.target)) return;
+        if (event.keyCode !== 229 && event.which !== 229) return;
+        // xterm.js can emit Android IME text once for keyCode 229 and again for input.
+        event.stopImmediatePropagation();
+        recordMobileInputEvent('ime-keydown-suppressed');
       }, true);
       terminalDocument.addEventListener('compositionstart', (event) => {
         if (!isXtermInput(event.target)) return;
@@ -901,7 +916,7 @@ async function handle(req, res) {
         session: SESSION,
         viewSession: target,
         running,
-        capture: running ? await capturePane(target, 2000) : '',
+        capture: running ? await capturePane(target, CAPTURE_LINES) : '',
         windows,
         currentWindow: windows.find((window) => window.active) || null,
       });
@@ -1048,7 +1063,7 @@ async function handle(req, res) {
         viewSession: target,
         windows,
         currentWindow: windows.find((window) => window.active) || null,
-        capture: await capturePane(target, 2000),
+        capture: await capturePane(target, CAPTURE_LINES),
       });
       return;
     }
