@@ -3,6 +3,7 @@
 
 const http = require('http');
 const { execFile, spawn } = require('child_process');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 const HOST = process.env.WORKBENCH_CONTROL_HOST || '127.0.0.1';
@@ -10,8 +11,12 @@ const PORT = Number(process.env.WORKBENCH_CONTROL_PORT || 18082);
 const BASE_PATH = normalizeBase(process.env.WORKBENCH_CONTROL_BASE_PATH || '/codex/terminal');
 const TTYD_PATH = normalizeBase(process.env.WORKBENCH_TTYD_PATH || '/codex/ttyd');
 const SESSION = process.env.WORKBENCH_TMUX_SESSION || 'codex-workbench';
+const VIEW_SESSION_PREFIX = process.env.WORKBENCH_VIEW_SESSION_PREFIX || `${SESSION}-view-`;
+const VIEW_TTL_MS = Number(process.env.WORKBENCH_VIEW_TTL_MS || 30 * 60 * 1000);
 const ENSURE_SCRIPT = process.env.WORKBENCH_ENSURE_SCRIPT || '/root/jerry/opt/codex-web-workbench/bin/ensure-workbench-tmux.sh';
 const MAX_TEXT_BYTES = Number(process.env.WORKBENCH_CONTROL_MAX_TEXT_BYTES || 65536);
+const VIEW_ID_PATTERN = /^[a-f0-9]{32}$/;
+const viewLastSeen = new Map();
 
 function normalizeBase(value) {
   let base = value || '';
@@ -85,20 +90,47 @@ async function ensureSession() {
   return run(ENSURE_SCRIPT, [], { timeout: 15000 });
 }
 
-async function hasSession() {
-  const result = await run('tmux', ['has-session', '-t', SESSION]);
+async function hasSession(target = SESSION) {
+  const result = await run('tmux', ['has-session', '-t', target]);
   return result.ok;
 }
 
-async function capturePane(lines = 80) {
-  const result = await run('tmux', ['capture-pane', '-p', '-t', SESSION, '-S', `-${lines}`]);
+function viewSessionName(viewId) {
+  return `${VIEW_SESSION_PREFIX}${viewId}`;
+}
+
+function isValidViewId(viewId) {
+  return VIEW_ID_PATTERN.test(String(viewId || ''));
+}
+
+async function ensureViewSession(viewId) {
+  if (!isValidViewId(viewId)) return SESSION;
+  if (!(await hasSession())) await ensureSession();
+
+  const target = viewSessionName(viewId);
+  if (!(await hasSession(target))) {
+    const created = await run('tmux', ['new-session', '-d', '-t', SESSION, '-s', target]);
+    if (!created.ok && !(await hasSession(target))) {
+      throw new Error(created.stderr || 'could not create workbench view session');
+    }
+  }
+  viewLastSeen.set(viewId, Date.now());
+  return target;
+}
+
+async function resolveViewSession(viewId) {
+  return isValidViewId(viewId) ? ensureViewSession(viewId) : SESSION;
+}
+
+async function capturePane(target = SESSION, lines = 80) {
+  const result = await run('tmux', ['capture-pane', '-p', '-t', target, '-S', `-${lines}`]);
   if (!result.ok) return '';
   return result.stdout;
 }
 
-async function captureWindow(windowIndex, lines = 35) {
+async function captureWindow(target, windowIndex, lines = 35) {
   if (!/^\d{1,4}$/.test(String(windowIndex))) return '';
-  const result = await run('tmux', ['capture-pane', '-p', '-t', `${SESSION}:${windowIndex}`, '-S', `-${lines}`]);
+  const result = await run('tmux', ['capture-pane', '-p', '-t', `${target}:${windowIndex}`, '-S', `-${lines}`]);
   if (!result.ok) return '';
   return result.stdout;
 }
@@ -132,7 +164,7 @@ function inferStatus(command, copyMode, screenText) {
   return { status: 'idle', label: '空闲', icon: '-', className: 'idle' };
 }
 
-async function listWindows() {
+async function listWindows(target = SESSION) {
   const format = [
     '#{window_index}',
     '#{window_id}',
@@ -143,7 +175,7 @@ async function listWindows() {
     '#{pane_in_mode}',
     '#{window_panes}',
   ].join('\t');
-  const result = await run('tmux', ['list-windows', '-t', SESSION, '-F', format]);
+  const result = await run('tmux', ['list-windows', '-t', target, '-F', format]);
   if (!result.ok) return [];
 
   const windows = [];
@@ -154,7 +186,7 @@ async function listWindows() {
     const index = Number(parts[0]);
     const command = parts[5] || '';
     const copyMode = parts[6] === '1';
-    const screen = await captureWindow(index);
+    const screen = await captureWindow(target, index);
     const status = inferStatus(command, copyMode, screen);
     windows.push({
       index,
@@ -174,12 +206,12 @@ async function listWindows() {
   return windows;
 }
 
-async function pasteText(text, enter) {
+async function pasteText(text, enter, target = SESSION, bufferName = 'workbench-web') {
   const bytes = Buffer.byteLength(text || '', 'utf8');
   if (bytes === 0) return { ok: false, error: 'empty text' };
   if (bytes > MAX_TEXT_BYTES) return { ok: false, error: `text exceeds ${MAX_TEXT_BYTES} bytes` };
 
-  const load = spawn('tmux', ['load-buffer', '-b', 'workbench-web', '-']);
+  const load = spawn('tmux', ['load-buffer', '-b', bufferName, '-']);
   load.stdin.write(text);
   load.stdin.end();
 
@@ -189,15 +221,36 @@ async function pasteText(text, enter) {
   });
   if (!loaded) return { ok: false, error: 'tmux load-buffer failed' };
 
-  const paste = await run('tmux', ['paste-buffer', '-b', 'workbench-web', '-t', SESSION]);
+  const paste = await run('tmux', ['paste-buffer', '-b', bufferName, '-t', target]);
   if (!paste.ok) return { ok: false, error: paste.stderr || 'tmux paste-buffer failed' };
 
   if (enter) {
-    const key = await run('tmux', ['send-keys', '-t', SESSION, 'Enter']);
+    const key = await run('tmux', ['send-keys', '-t', target, 'Enter']);
     if (!key.ok) return { ok: false, error: key.stderr || 'tmux send Enter failed' };
   }
 
+  await run('tmux', ['delete-buffer', '-b', bufferName]);
   return { ok: true, bytes };
+}
+
+async function cleanupViewSessions() {
+  const now = Date.now();
+  for (const [viewId, lastSeen] of viewLastSeen) {
+    if (now - lastSeen < VIEW_TTL_MS) continue;
+    const target = viewSessionName(viewId);
+    const clients = await run('tmux', ['list-clients', '-t', target, '-F', '#{client_name}']);
+    if (clients.ok && clients.stdout.trim()) {
+      viewLastSeen.set(viewId, now);
+      continue;
+    }
+    await run('tmux', ['kill-session', '-t', target]);
+    viewLastSeen.delete(viewId);
+  }
+}
+
+function requestViewId(url, body = {}) {
+  const value = body.view || url.searchParams.get('view') || '';
+  return isValidViewId(value) ? value : '';
 }
 
 const ALLOWED_KEYS = new Set([
@@ -246,9 +299,16 @@ function pageHtml() {
     label { display:block; margin: 0 0 6px; color: var(--muted); font-size: 13px; }
     textarea { width: 100%; min-height: 150px; resize: vertical; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: var(--text); font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .buttons, .links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .compact-action { flex: 0 0 auto; min-height: 34px; padding: 6px 10px; font-size: 13px; }
+    .terminal-nav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .terminal-nav button { flex: 0 0 auto; min-height: 34px; padding: 5px 9px; border-color: #35414c; color: var(--muted); background: #15191d; font-size: 13px; }
+    .terminal-nav button:hover:not(:disabled) { color: var(--text); border-color: #566676; background: #20262c; }
+    .terminal-nav .live { color: #9cc9aa; border-color: rgba(53,208,127,.35); }
+    .terminal-nav .nav-label { margin-right: 2px; color: #687582; font-size: 12px; user-select: none; }
     a, button { min-height: 42px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; background: var(--panel); color: var(--text); font: inherit; text-decoration: none; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #071018; font-weight: 700; }
-    button.danger { color: var(--danger); }
+    button.danger { color: var(--danger); border-color: rgba(255,107,107,.45); }
+    button.danger:hover:not(:disabled) { background: rgba(255,107,107,.12); }
     button:disabled { opacity: 1; cursor: default; }
     button:active, a:active { transform: translateY(1px); }
     input { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; background: #0b0d0f; color: var(--text); font: inherit; }
@@ -265,20 +325,48 @@ function pageHtml() {
     .tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
     .tab-sub { overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
     .window-tools { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(4, auto); gap: 8px; align-items: center; }
+    .window-more, .window-more-items, .nav-more, .nav-more-items, .more-controls, .more-controls-content { display: contents; }
+    .window-more > summary, .nav-more > summary, .more-controls > summary { display: none; }
     .split { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 10px; align-items: start; }
-    pre { min-height: 150px; max-height: 260px; overflow: auto; white-space: pre-wrap; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: #d9e2ea; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { min-height: 180px; height: min(60vh, 576px); max-height: 576px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0b0d0f; color: #d9e2ea; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 9px; color: var(--muted); font-size: 13px; }
     .drop.active { border-color: var(--accent); color: var(--text); }
+    summary { list-style: none; cursor: pointer; }
+    summary::-webkit-details-marker { display: none; }
     @media (max-width: 760px) {
       header { align-items: flex-start; flex-direction: column; }
       main { padding: 8px; }
-      .terminal-frame { height: 46vh; min-height: 280px; border-radius: 6px; }
+      .terminal-frame { height: clamp(320px, calc(100dvh - 310px), 560px); min-height: 320px; border-radius: 6px; }
       .split { grid-template-columns: 1fr; }
-      .window-tools { grid-template-columns: 1fr 1fr; }
-      .window-tools input { grid-column: 1 / -1; }
+      .nav-more, .window-more, .more-controls { display: block; }
+      .nav-more { flex: 1 1 calc(50% - 8px); min-width: 0; }
+      .nav-more > summary, .window-more > summary, .more-controls > summary {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        min-height: 44px;
+        padding: 9px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font: inherit;
+      }
+      .nav-more > summary::after, .window-more > summary::after, .more-controls > summary::after { content: '+'; color: var(--muted); font-size: 18px; line-height: 1; }
+      .nav-more[open] > summary::after, .window-more[open] > summary::after, .more-controls[open] > summary::after { content: '−'; }
+      .nav-more-items, .window-more-items, .more-controls-content { display: none; }
+      .nav-more[open] .nav-more-items, .window-more[open] .window-more-items, .more-controls[open] .more-controls-content { display: grid; gap: 8px; margin-top: 8px; }
+      .nav-more[open] .nav-more-items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .window-more[open] .window-more-items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .more-controls[open] .more-controls-content { display: block; }
+      .window-tools { grid-template-columns: minmax(0, 1fr) auto; }
+      .window-tools input { grid-column: auto; }
+      .window-more { grid-column: 1 / -1; }
       a, button { flex: 1 1 calc(33.333% - 8px); min-height: 44px; padding-left: 8px; padding-right: 8px; }
       textarea { min-height: 170px; }
-      pre { max-height: 180px; }
+      pre { height: min(52vh, 480px); max-height: 480px; }
+      .more-controls { margin-top: 10px; }
     }
     @media (max-width: 420px) {
       a, button { flex-basis: calc(50% - 8px); }
@@ -293,8 +381,13 @@ function pageHtml() {
   <main>
     <nav class="links">
       <a href="/codex/terminal/">Terminal</a>
-      <a href="/codex/ide/">IDE</a>
-      <a href="${TTYD_PATH}/" target="workbench-terminal">Full View</a>
+      <details class="nav-more" open data-mobile-collapse>
+        <summary>More</summary>
+        <div class="nav-more-items">
+          <a href="/codex/ide/">IDE</a>
+          <a id="fullView" href="${TTYD_PATH}/" target="workbench-terminal">Full View</a>
+        </div>
+      </details>
     </nav>
 
     <section>
@@ -302,73 +395,237 @@ function pageHtml() {
       <div class="window-tools">
         <input id="windowName" maxlength="64" placeholder="Rename current tab">
         <button id="renameWindow">Rename</button>
-        <button id="newWindow">New Tab</button>
-        <button id="splitH">Split H</button>
-        <button id="splitV">Split V</button>
+        <details class="window-more" open data-mobile-collapse>
+          <summary>Window actions</summary>
+          <div class="window-more-items">
+            <button id="newWindow">New Tab</button>
+            <button id="splitH">Split H</button>
+            <button id="splitV">Split V</button>
+          </div>
+        </details>
       </div>
     </section>
 
-    <section class="terminal-frame">
-      <iframe id="terminal" name="workbench-terminal" src="${TTYD_PATH}/" title="Terminal"></iframe>
+    <section class="terminal-frame" id="terminalFrame">
+      <iframe id="terminal" name="workbench-terminal" src="about:blank" title="Terminal"></iframe>
     </section>
 
-    <section class="split">
-      <div>
-        <label for="prompt">Input</label>
-        <textarea id="prompt" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Type or paste text..."></textarea>
-        <div class="drop" id="drop">Drop a text file here.</div>
+    <details class="more-controls" open data-mobile-collapse>
+      <summary>More controls</summary>
+      <div class="more-controls-content">
+        <section class="split">
+          <div>
+            <label for="prompt">Input</label>
+            <textarea id="prompt" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Type or paste text..."></textarea>
+            <div class="drop" id="drop">Drop a text file here.</div>
+          </div>
+          <div>
+            <label for="capture">Recent output</label>
+            <pre id="capture"></pre>
+          </div>
+        </section>
+
+        <section class="buttons">
+          <button class="primary" id="sendEnter">Send + Enter</button>
+          <button id="sendOnly">Paste Only</button>
+          <button id="pasteClipboard">Paste Clipboard</button>
+          <button id="copyOutput">Copy Output</button>
+          <button id="clearBox">Clear Box</button>
+        </section>
+
+        <section class="buttons">
+          <button data-text="codex" data-enter="true">codex</button>
+          <button data-text="codex-lu" data-enter="true">codex-lu</button>
+          <button data-text="codex-mi-1" data-enter="true">codex-mi-1</button>
+          <button data-text="clear" data-enter="true">clear</button>
+          <button id="startSession">Start Shell</button>
+          <button id="refresh">Refresh</button>
+          <button id="killPane" class="danger compact-action">Close Pane</button>
+          <button id="killWindow" class="danger compact-action">Close Window</button>
+        </section>
+
+        <section class="buttons">
+          <button data-key="Enter">Enter</button>
+          <button data-key="Tab">Tab</button>
+          <button data-key="Escape">Esc</button>
+          <button data-key="Up">Up</button>
+          <button data-key="Down">Down</button>
+          <button data-key="Left">Left</button>
+          <button data-key="Right">Right</button>
+          <button data-key="C-c" class="danger">Ctrl+C</button>
+          <button data-key="C-d" class="danger">Ctrl+D</button>
+          <button data-key="C-l">Ctrl+L</button>
+          <button data-key="C-r">Ctrl+R</button>
+          <button data-key="C-u">Ctrl+U</button>
+          <button data-key="C-w">Ctrl+W</button>
+          <button data-key="C-a">Ctrl+A</button>
+          <button data-key="C-e">Ctrl+E</button>
+        </section>
+        <section class="terminal-nav" aria-label="Terminal navigation">
+          <span class="nav-label">scroll</span>
+          <button type="button" data-navigation="scroll_up" title="Scroll up 5 lines" aria-label="Scroll up 5 lines">▲ 5</button>
+          <button type="button" data-navigation="scroll_down" title="Scroll down 5 lines" aria-label="Scroll down 5 lines">▼ 5</button>
+          <button type="button" class="live" data-navigation="live" title="Exit copy mode and return to live input" aria-label="Exit copy mode and return to live input">● Live</button>
+        </section>
       </div>
-      <div>
-        <label for="capture">Recent output</label>
-        <pre id="capture"></pre>
-      </div>
-    </section>
-
-    <section class="buttons">
-      <button class="primary" id="sendEnter">Send + Enter</button>
-      <button id="sendOnly">Paste Only</button>
-      <button id="pasteClipboard">Paste Clipboard</button>
-      <button id="copyOutput">Copy Output</button>
-      <button id="clearBox">Clear Box</button>
-    </section>
-
-    <section class="buttons">
-      <button data-text="codex" data-enter="true">codex</button>
-      <button data-text="codex-lu" data-enter="true">codex-lu</button>
-      <button data-text="codex-mi-1" data-enter="true">codex-mi-1</button>
-      <button data-text="clear" data-enter="true">clear</button>
-      <button id="startSession">Start Shell</button>
-      <button id="refresh">Refresh</button>
-    </section>
-
-    <section class="buttons">
-      <button data-key="Enter">Enter</button>
-      <button data-key="Tab">Tab</button>
-      <button data-key="Escape">Esc</button>
-      <button data-key="Up">Up</button>
-      <button data-key="Down">Down</button>
-      <button data-key="Left">Left</button>
-      <button data-key="Right">Right</button>
-      <button data-key="C-c" class="danger">Ctrl+C</button>
-      <button data-key="C-d" class="danger">Ctrl+D</button>
-      <button data-key="C-l">Ctrl+L</button>
-      <button data-key="C-r">Ctrl+R</button>
-      <button data-key="C-u">Ctrl+U</button>
-      <button data-key="C-w">Ctrl+W</button>
-      <button data-key="C-a">Ctrl+A</button>
-      <button data-key="C-e">Ctrl+E</button>
-    </section>
+    </details>
   </main>
   <script>
     const base = ${JSON.stringify(BASE_PATH)};
+    const ttydBase = ${JSON.stringify(`${TTYD_PATH}/`)};
     const $ = (id) => document.getElementById(id);
+    const mobileLayout = window.matchMedia('(max-width: 760px)');
+    function syncCollapsibleControls() {
+      document.querySelectorAll('details[data-mobile-collapse]').forEach((details) => {
+        details.open = !mobileLayout.matches;
+      });
+    }
+    syncCollapsibleControls();
+    mobileLayout.addEventListener?.('change', syncCollapsibleControls);
+    const viewId = (() => {
+      const key = 'codex-workbench-view-id';
+      const viewIdPattern = /^[a-f0-9]{32}$/;
+      const stored = window.sessionStorage.getItem(key);
+      if (viewIdPattern.test(stored || '')) return stored;
+      const generated = crypto.randomUUID().replace(/-/g, '');
+      window.sessionStorage.setItem(key, generated);
+      return generated;
+    })();
+    const ttydUrl = ttydBase + '?arg=view=' + viewId;
+    $('terminal').src = ttydUrl;
+    $('fullView').href = ttydUrl;
     let currentWindowId = null;
+    // Keep the ttyd iframe stable while a mobile IME owns xterm's hidden textarea.
+    const mobileInputEvents = [];
+    const mobileInput = {
+      engaged: false,
+      focused: false,
+      composing: false,
+      locked: false,
+      unlockTimer: null,
+      viewportHeight: window.visualViewport?.height || window.innerHeight,
+      maxViewportHeight: window.visualViewport?.height || window.innerHeight,
+    };
+    window.workbenchMobileInputEvents = mobileInputEvents;
+
+    function recordMobileInputEvent(type, detail = {}) {
+      mobileInputEvents.push({
+        at: new Date().toISOString(),
+        type,
+        engaged: mobileInput.engaged,
+        focused: mobileInput.focused,
+        composing: mobileInput.composing,
+        frameHeight: Math.round($('terminalFrame').getBoundingClientRect().height),
+        viewportHeight: Math.round(window.visualViewport?.height || window.innerHeight),
+        ...detail,
+      });
+      if (mobileInputEvents.length > 100) mobileInputEvents.shift();
+    }
+
+    function usesTouchKeyboard() {
+      return navigator.maxTouchPoints > 0 &&
+        window.matchMedia('(hover: none), (pointer: coarse)').matches;
+    }
+
+    function lockTerminalHeight(reason) {
+      if (!usesTouchKeyboard()) return;
+      if (mobileInput.unlockTimer) {
+        clearTimeout(mobileInput.unlockTimer);
+        mobileInput.unlockTimer = null;
+      }
+      if (!mobileInput.locked) {
+        const frame = $('terminalFrame');
+        frame.style.height = Math.round(frame.getBoundingClientRect().height) + 'px';
+        frame.dataset.keyboardLocked = 'true';
+        mobileInput.locked = true;
+      }
+      recordMobileInputEvent('height-lock', { reason });
+    }
+
+    function unlockTerminalHeight(reason, delay = 650) {
+      if (!mobileInput.locked) return;
+      if (mobileInput.unlockTimer) clearTimeout(mobileInput.unlockTimer);
+      mobileInput.unlockTimer = setTimeout(() => {
+        if (mobileInput.focused || mobileInput.composing) return;
+        const frame = $('terminalFrame');
+        frame.style.removeProperty('height');
+        delete frame.dataset.keyboardLocked;
+        mobileInput.locked = false;
+        mobileInput.unlockTimer = null;
+        recordMobileInputEvent('height-unlock', { reason });
+      }, delay);
+    }
+
+    function isXtermInput(target) {
+      return Boolean(target?.classList?.contains('xterm-helper-textarea'));
+    }
+
+    function wireTerminalInputEvents() {
+      if (!usesTouchKeyboard()) return;
+      const terminalWindow = $('terminal').contentWindow;
+      const terminalDocument = terminalWindow?.document;
+      if (!terminalDocument || terminalDocument.__workbenchMobileInputWired) return;
+      terminalDocument.__workbenchMobileInputWired = true;
+
+      const interactionEvent = 'PointerEvent' in terminalWindow ? 'pointerdown' : 'touchstart';
+      terminalDocument.addEventListener(interactionEvent, (event) => {
+        if (!event.target?.closest?.('.xterm')) return;
+        mobileInput.engaged = true;
+        mobileInput.focused = isXtermInput(terminalDocument.activeElement);
+        lockTerminalHeight('terminal-pointerdown');
+        recordMobileInputEvent(interactionEvent);
+      }, true);
+      terminalDocument.addEventListener('focusin', (event) => {
+        if (!isXtermInput(event.target)) return;
+        mobileInput.focused = true;
+        if (mobileInput.engaged) lockTerminalHeight('focus');
+        recordMobileInputEvent('focus');
+      }, true);
+      terminalDocument.addEventListener('focusout', (event) => {
+        if (!isXtermInput(event.target)) return;
+        mobileInput.focused = false;
+        mobileInput.composing = false;
+        recordMobileInputEvent('blur', {
+          relatedTarget: event.relatedTarget?.className || event.relatedTarget?.tagName || '',
+        });
+        mobileInput.engaged = false;
+        unlockTerminalHeight('blur');
+      }, true);
+      terminalDocument.addEventListener('compositionstart', (event) => {
+        if (!isXtermInput(event.target)) return;
+        mobileInput.engaged = true;
+        mobileInput.composing = true;
+        lockTerminalHeight('compositionstart');
+        recordMobileInputEvent('compositionstart');
+      }, true);
+      terminalDocument.addEventListener('compositionend', (event) => {
+        if (!isXtermInput(event.target)) return;
+        mobileInput.composing = false;
+        recordMobileInputEvent('compositionend', { dataLength: String(event.data || '').length });
+      }, true);
+    }
 
     async function api(path, options = {}) {
-      const res = await fetch(base + path, {
+      const request = { ...options };
+      const method = String(request.method || 'GET').toUpperCase();
+      const separator = path.includes('?') ? '&' : '?';
+      const requestPath = path + separator + 'view=' + encodeURIComponent(viewId);
+      if (method !== 'GET') {
+        let body = {};
+        if (request.body) {
+          try {
+            body = JSON.parse(request.body);
+          } catch {
+            throw new Error('invalid request body');
+          }
+        }
+        body.view = viewId;
+        request.body = JSON.stringify(body);
+      }
+      const res = await fetch(base + requestPath, {
         headers: { 'content-type': 'application/json' },
         cache: 'no-store',
-        ...options,
+        ...request,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
@@ -429,11 +686,20 @@ function pageHtml() {
 
     function applyStatus(data) {
       const current = data.currentWindow || (Array.isArray(data.windows) ? data.windows.find((window) => window.active) : null);
+      const windows = Array.isArray(data.windows) ? data.windows : [];
       $('status').textContent = data.running
         ? 'tmux: ' + data.session + (current ? ' · #' + current.index + ' ' + current.name + ' · ' + current.statusLabel : '')
         : 'tmux: not running';
       $('capture').textContent = data.capture || '';
-      renderTabs(data.windows || []);
+      renderTabs(windows);
+      $('killPane').disabled = !current || Number(current.panes || 0) < 2;
+      $('killPane').title = current && Number(current.panes || 0) >= 2
+        ? 'Close the active pane in the selected window'
+        : 'This window has only one pane';
+      $('killWindow').disabled = !current || windows.length < 2;
+      $('killWindow').title = windows.length >= 2
+        ? 'Close the selected tmux window'
+        : 'The last tmux window cannot be closed';
       if (current && (current.id !== currentWindowId || document.activeElement !== $('windowName'))) {
         $('windowName').value = current.name || '';
         currentWindowId = current.id || null;
@@ -451,10 +717,30 @@ function pageHtml() {
 
     async function windowAction(action, extra = {}) {
       $('status').textContent = 'Updating tmux...';
-      const data = await api('/api/window', { method: 'POST', body: JSON.stringify({ action, ...extra }) });
-      applyStatus({ session: ${JSON.stringify(SESSION)}, running: true, ...data });
-      $('terminal').contentWindow?.focus?.();
-      return data;
+      try {
+        const data = await api('/api/window', { method: 'POST', body: JSON.stringify({ action, ...extra }) });
+        applyStatus({ session: ${JSON.stringify(SESSION)}, running: true, ...data });
+        $('terminal').contentWindow?.focus?.();
+        return data;
+      } catch (error) {
+        $('status').textContent = 'Error: ' + error.message;
+        return null;
+      }
+    }
+
+    function confirmWindowAction(action) {
+      const status = $('status').textContent;
+      const current = status || 'the selected tmux target';
+      if (action === 'kill_pane') {
+        return window.confirm(
+          'Close the active pane in ' + current + '?\\n\\n' +
+          'Any process running in that pane will be terminated.'
+        );
+      }
+      return window.confirm(
+        'Close the selected tmux window (' + current + ')?\\n\\n' +
+        'All panes and processes in that window will be terminated.'
+      );
     }
 
     async function sendText(text, enter) {
@@ -475,6 +761,12 @@ function pageHtml() {
     $('newWindow').onclick = () => windowAction('new');
     $('splitH').onclick = () => windowAction('split_h');
     $('splitV').onclick = () => windowAction('split_v');
+    $('killPane').onclick = () => {
+      if (confirmWindowAction('kill_pane')) windowAction('kill_pane');
+    };
+    $('killWindow').onclick = () => {
+      if (confirmWindowAction('kill_window')) windowAction('kill_window');
+    };
     $('renameWindow').onclick = () => windowAction('rename', { name: $('windowName').value });
     $('windowName').onkeydown = (event) => {
       if (event.key === 'Enter') {
@@ -512,6 +804,22 @@ function pageHtml() {
         setTimeout(refresh, 300);
       };
     });
+    document.querySelectorAll('button[data-navigation]').forEach((button) => {
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          await api('/api/navigation', {
+            method: 'POST',
+            body: JSON.stringify({ action: button.dataset.navigation }),
+          });
+          await refresh();
+        } catch (error) {
+          $('status').textContent = 'Error: ' + error.message;
+        } finally {
+          button.disabled = false;
+        }
+      };
+    });
     document.querySelectorAll('button[data-text]').forEach((button) => {
       button.onclick = () => sendText(button.dataset.text, button.dataset.enter === 'true');
     });
@@ -527,6 +835,41 @@ function pageHtml() {
       $('prompt').value = await file.text();
       $('prompt').focus();
     };
+
+    $('terminal').addEventListener('load', () => {
+      try {
+        wireTerminalInputEvents();
+      } catch (error) {
+        recordMobileInputEvent('wire-error', { message: error.message || String(error) });
+      }
+    });
+    window.visualViewport?.addEventListener('resize', () => {
+      const nextHeight = window.visualViewport.height;
+      const previousHeight = mobileInput.viewportHeight;
+      mobileInput.maxViewportHeight = Math.max(mobileInput.maxViewportHeight, nextHeight);
+      recordMobileInputEvent('viewport-resize', {
+        previousHeight: Math.round(previousHeight),
+        nextHeight: Math.round(nextHeight),
+      });
+      mobileInput.viewportHeight = nextHeight;
+      if (
+        mobileInput.locked &&
+        !mobileInput.composing &&
+        nextHeight - previousHeight > 160 &&
+        nextHeight > mobileInput.maxViewportHeight * 0.8
+      ) {
+        mobileInput.engaged = false;
+        mobileInput.focused = false;
+        unlockTerminalHeight('keyboard-closed', 0);
+      }
+    });
+    window.addEventListener('orientationchange', () => {
+      mobileInput.engaged = false;
+      mobileInput.focused = false;
+      mobileInput.composing = false;
+      mobileInput.maxViewportHeight = window.visualViewport?.height || window.innerHeight;
+      unlockTerminalHeight('orientationchange', 0);
+    });
 
     refresh();
     setInterval(refresh, 30000);
@@ -551,43 +894,106 @@ async function handle(req, res) {
   try {
     if (req.method === 'GET' && pathname === `${BASE_PATH}/api/status`) {
       const running = await hasSession();
-      const windows = running ? await listWindows() : [];
+      const viewId = requestViewId(url);
+      const target = running ? await resolveViewSession(viewId) : SESSION;
+      const windows = running ? await listWindows(target) : [];
       sendJson(res, 200, {
         session: SESSION,
+        viewSession: target,
         running,
-        capture: running ? await capturePane(90) : '',
+        capture: running ? await capturePane(target, 2000) : '',
         windows,
         currentWindow: windows.find((window) => window.active) || null,
       });
       return;
     }
     if (req.method === 'POST' && pathname === `${BASE_PATH}/api/start`) {
+      const body = await readJson(req);
       const started = await ensureSession();
-      sendJson(res, started.ok ? 200 : 500, { ok: started.ok, output: started.stdout, error: started.stderr });
+      const target = started.ok ? await resolveViewSession(requestViewId(url, body)) : SESSION;
+      sendJson(res, started.ok ? 200 : 500, {
+        ok: started.ok,
+        output: started.stdout,
+        error: started.stderr,
+        viewSession: target,
+      });
       return;
     }
     if (req.method === 'POST' && pathname === `${BASE_PATH}/api/send`) {
       if (!(await hasSession())) await ensureSession();
       const body = await readJson(req);
-      const result = await pasteText(String(body.text || ''), body.enter !== false);
+      const target = await resolveViewSession(requestViewId(url, body));
+      const bufferName = `workbench-web-${requestViewId(url, body) || 'legacy'}`;
+      const result = await pasteText(String(body.text || ''), body.enter !== false, target, bufferName);
       sendJson(res, result.ok ? 200 : 400, result);
       return;
     }
     if (req.method === 'POST' && pathname === `${BASE_PATH}/api/key`) {
       if (!(await hasSession())) await ensureSession();
       const body = await readJson(req);
+      const target = await resolveViewSession(requestViewId(url, body));
       const key = String(body.key || '');
       if (!ALLOWED_KEYS.has(key)) {
         sendJson(res, 400, { error: 'key not allowed' });
         return;
       }
-      const result = await run('tmux', ['send-keys', '-t', SESSION, key]);
+      const result = await run('tmux', ['send-keys', '-t', `${target}:.`, key]);
+      sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.stderr });
+      return;
+    }
+    if (req.method === 'POST' && pathname === `${BASE_PATH}/api/navigation`) {
+      if (!(await hasSession())) await ensureSession();
+      const body = await readJson(req);
+      const target = await resolveViewSession(requestViewId(url, body));
+      const action = String(body.action || '');
+      let result;
+      if (action === 'live') {
+        result = await run('tmux', ['copy-mode', '-q', '-t', `${target}:.`]);
+      } else if (action === 'scroll_up' || action === 'scroll_down') {
+        const mode = await run('tmux', ['display-message', '-p', '-t', `${target}:.`, '#{pane_in_mode}']);
+        if (!mode.ok) {
+          sendJson(res, 500, { error: mode.stderr || 'could not inspect tmux mode' });
+          return;
+        }
+        if (mode.stdout.trim() !== '1') {
+          if (action === 'scroll_up') {
+            const entered = await run('tmux', ['copy-mode', '-e', '-t', `${target}:.`]);
+            result = entered.ok
+              ? await run('tmux', [
+                  'send-keys',
+                  '-X',
+                  '-N',
+                  '5',
+                  '-t',
+                  `${target}:.`,
+                  'scroll-up',
+                ])
+              : entered;
+          } else {
+            result = { ok: true, stderr: '' };
+          }
+        } else {
+          result = await run('tmux', [
+            'send-keys',
+            '-X',
+            '-N',
+            '5',
+            '-t',
+            `${target}:.`,
+            action === 'scroll_up' ? 'scroll-up' : 'scroll-down',
+          ]);
+        }
+      } else {
+        sendJson(res, 400, { error: 'navigation action not allowed' });
+        return;
+      }
       sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.stderr });
       return;
     }
     if (req.method === 'POST' && pathname === `${BASE_PATH}/api/window`) {
       if (!(await hasSession())) await ensureSession();
       const body = await readJson(req);
+      const target = await resolveViewSession(requestViewId(url, body));
       const action = String(body.action || '');
       let result;
       if (action === 'focus') {
@@ -596,34 +1002,53 @@ async function handle(req, res) {
           sendJson(res, 400, { error: 'invalid window index' });
           return;
         }
-        result = await run('tmux', ['select-window', '-t', `${SESSION}:${index}`]);
+        result = await run('tmux', ['select-window', '-t', `${target}:${index}`]);
       } else if (action === 'new') {
-        result = await run('tmux', ['new-window', '-t', SESSION]);
+        result = await run('tmux', ['new-window', '-t', target]);
       } else if (action === 'rename') {
         const name = String(body.name || '').trim().replace(/\s+/g, ' ');
         if (!name || name.length > 64 || /[\x00-\x1F\x7F]/.test(name)) {
           sendJson(res, 400, { error: 'invalid window name' });
           return;
         }
-        const autoRename = await run('tmux', ['set-option', '-w', '-t', `${SESSION}:.`, 'automatic-rename', 'off']);
+        const autoRename = await run('tmux', ['set-option', '-w', '-t', `${target}:.`, 'automatic-rename', 'off']);
         result = autoRename.ok
-          ? await run('tmux', ['rename-window', '-t', `${SESSION}:.`, name])
+          ? await run('tmux', ['rename-window', '-t', `${target}:.`, name])
           : autoRename;
       } else if (action === 'split_h') {
-        result = await run('tmux', ['split-window', '-h', '-t', `${SESSION}:.`]);
+        result = await run('tmux', ['split-window', '-h', '-t', `${target}:.`]);
       } else if (action === 'split_v') {
-        result = await run('tmux', ['split-window', '-v', '-t', `${SESSION}:.`]);
+        result = await run('tmux', ['split-window', '-v', '-t', `${target}:.`]);
+      } else if (action === 'kill_window' || action === 'kill_pane') {
+        const windowsBefore = await listWindows(target);
+        const current = windowsBefore.find((window) => window.active);
+        if (!current) {
+          sendJson(res, 400, { error: 'no active tmux window' });
+          return;
+        }
+        if (action === 'kill_window' && windowsBefore.length < 2) {
+          sendJson(res, 400, { error: 'cannot close the last tmux window' });
+          return;
+        }
+        if (action === 'kill_pane' && Number(current.panes || 0) < 2) {
+          sendJson(res, 400, { error: 'cannot close the only pane; close the window instead' });
+          return;
+        }
+        result = action === 'kill_window'
+          ? await run('tmux', ['kill-window', '-t', `${target}:.`])
+          : await run('tmux', ['kill-pane', '-t', `${target}:.`]);
       } else {
         sendJson(res, 400, { error: 'window action not allowed' });
         return;
       }
-      const windows = await listWindows();
+      const windows = await listWindows(target);
       sendJson(res, result.ok ? 200 : 500, {
         ok: result.ok,
         error: result.stderr,
+        viewSession: target,
         windows,
         currentWindow: windows.find((window) => window.active) || null,
-        capture: await capturePane(90),
+        capture: await capturePane(target, 2000),
       });
       return;
     }
@@ -637,3 +1062,10 @@ const server = http.createServer(handle);
 server.listen(PORT, HOST, () => {
   console.log(`workbench-control listening on http://${HOST}:${PORT}${BASE_PATH}/`);
 });
+
+const cleanupTimer = setInterval(() => {
+  cleanupViewSessions().catch((error) => {
+    console.error(`view session cleanup failed: ${error.message || error}`);
+  });
+}, 60 * 1000);
+cleanupTimer.unref();

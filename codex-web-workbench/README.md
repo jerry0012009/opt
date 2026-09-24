@@ -10,6 +10,11 @@ Primary routes:
 - `/codex/ttyd/` - raw ttyd terminal view used by the combined page.
 
 The terminal opens a persistent root `tmux` shell named `codex-workbench`.
+All browser tabs share the same windows, panes, processes, and filesystem, while
+each browser tab gets its own lightweight tmux view session. This keeps window
+switching and the active terminal target independent between tabs without
+separating the shared workbench.
+
 It does not auto-run a specific Codex binary. From the web terminal, choose the
 CLI you want:
 
@@ -31,15 +36,22 @@ Terminal stability defaults:
   short-idle browser/network paths.
 - ttyd allows up to 16 clients because delayed close detection can leave stale
   websocket clients around briefly.
+- Browser view sessions expire after 30 minutes without a status heartbeat and
+  are removed without stopping the shared `codex-workbench` session.
 
 Operational commands:
 
 ```bash
 systemctl status codex-tmux.service codex-code-server.service codex-ttyd.service codex-control.service
-systemctl restart codex-tmux.service codex-code-server.service codex-ttyd.service codex-control.service
+systemctl restart codex-ttyd.service codex-control.service
 tmux attach -t codex-workbench
 /root/jerry/opt/codex-web-workbench/bin/show-credentials.sh
 ```
+
+`codex-tmux.service` only ensures that the shared `codex-workbench` session
+exists. Stopping or restarting this unit does not kill the tmux session; use
+`tmux kill-session -t codex-workbench` only when you intentionally want to
+terminate every workbench window and its processes.
 
 Credentials:
 
@@ -56,6 +68,9 @@ Mobile workflow:
 4. Use shortcut buttons for keys that are awkward on phones, such as `Tab`,
    arrows, `Ctrl+C`, `Ctrl+D`, `Ctrl+R`, and `Ctrl+U`.
 5. Use quick buttons to start `codex`, `codex-lu`, or `codex-mi-1`.
+6. Use `Close Pane` or `Close Window` beside the tab controls when needed.
+   Each operation requires confirmation. The last window and the only pane in a
+   window are protected from accidental closure.
 
 Install notes for a new server:
 

@@ -7,6 +7,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 nginx -t
-systemctl restart codex-tmux.service codex-code-server.service codex-ttyd.service codex-control.service
+systemctl restart codex-code-server.service codex-ttyd.service codex-control.service
 systemctl reload nginx
 systemctl --no-pager --full status codex-tmux.service codex-code-server.service codex-ttyd.service codex-control.service

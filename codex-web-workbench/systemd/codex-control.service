@@ -12,6 +12,7 @@ Environment=WORKBENCH_CONTROL_PORT=18082
 Environment=WORKBENCH_CONTROL_BASE_PATH=/codex/terminal
 Environment=WORKBENCH_TTYD_PATH=/codex/ttyd
 Environment=WORKBENCH_TMUX_SESSION=codex-workbench
+Environment=WORKBENCH_VIEW_SESSION_PREFIX=codex-workbench-view-
 Environment=WORKBENCH_WORKDIR=/root/jerry
 ExecStart=/usr/bin/node /root/jerry/opt/codex-web-workbench/bin/workbench-control-server.js
 Restart=always
