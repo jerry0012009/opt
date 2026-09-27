@@ -36,14 +36,8 @@ Terminal stability defaults:
   short-idle browser/network paths.
 - ttyd allows up to 16 clients because delayed close detection can leave stale
   websocket clients around briefly.
-- Browser view sessions expire after 7 days without a status heartbeat and are
-  removed without stopping the shared `codex-workbench` session. Heartbeats are
-  stored in the view session so expiry survives control-server restarts;
-  attached view sessions are never removed.
-- Mobile scroll buttons use tmux copy-mode for normal terminals and send one
-  PageUp/PageDown/Escape key to alternate-screen applications such as the newer
-  Codex TUI. This check happens only when a button is clicked; there is no
-  background scroll polling or iframe reload.
+- Browser view sessions expire after 30 minutes without a status heartbeat and
+  are removed without stopping the shared `codex-workbench` session.
 
 Operational commands:
 

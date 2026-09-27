@@ -13,8 +13,7 @@ const BASE_PATH = normalizeBase(process.env.WORKBENCH_CONTROL_BASE_PATH || '/cod
 const TTYD_PATH = normalizeBase(process.env.WORKBENCH_TTYD_PATH || '/codex/ttyd');
 const SESSION = process.env.WORKBENCH_TMUX_SESSION || 'codex-workbench';
 const VIEW_SESSION_PREFIX = process.env.WORKBENCH_VIEW_SESSION_PREFIX || `${SESSION}-view-`;
-const VIEW_TTL_MS = Number(process.env.WORKBENCH_VIEW_TTL_MS || 7 * 24 * 60 * 60 * 1000);
-const VIEW_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
+const VIEW_TTL_MS = Number(process.env.WORKBENCH_VIEW_TTL_MS || 30 * 60 * 1000);
 const ENSURE_SCRIPT = process.env.WORKBENCH_ENSURE_SCRIPT || '/root/jerry/opt/codex-web-workbench/bin/ensure-workbench-tmux.sh';
 const MAX_TEXT_BYTES = Number(process.env.WORKBENCH_CONTROL_MAX_TEXT_BYTES || 65536);
 const CAPTURE_LINES = Number(process.env.WORKBENCH_CAPTURE_LINES || 4000);
@@ -142,18 +141,7 @@ async function ensureViewSession(viewId) {
       throw new Error(created.stderr || 'could not create workbench view session');
     }
   }
-  const now = Date.now();
-  if (!viewLastSeen.has(viewId) || now - viewLastSeen.get(viewId) >= VIEW_HEARTBEAT_INTERVAL_MS) {
-    const heartbeat = await run('tmux', [
-      'set-option',
-      '-t',
-      target,
-      '@workbench_last_heartbeat',
-      String(Math.floor(now / 1000)),
-    ]);
-    if (!heartbeat.ok) throw new Error(heartbeat.stderr || 'could not renew workbench view session');
-    viewLastSeen.set(viewId, now);
-  }
+  viewLastSeen.set(viewId, Date.now());
   return target;
 }
 
@@ -273,24 +261,17 @@ async function pasteText(text, enter, target = SESSION, bufferName = 'workbench-
 }
 
 async function cleanupViewSessions() {
-  const sessions = await run('tmux', [
-    'list-sessions',
-    '-F',
-    '#{session_name}\t#{session_created}\t#{@workbench_last_heartbeat}\t#{session_attached}',
-  ]);
-  if (!sessions.ok) return;
   const now = Date.now();
-  for (const line of sessions.stdout.split(/\r?\n/)) {
-    const [target, created, heartbeat, attached] = line.split('\t');
-    const viewId = target?.startsWith(VIEW_SESSION_PREFIX)
-      ? target.slice(VIEW_SESSION_PREFIX.length)
-      : '';
-    if (!isValidViewId(viewId) || Number(attached) > 0) continue;
-    const lastSeen = Number(heartbeat || created) * 1000;
-    if (!lastSeen || now - lastSeen < VIEW_TTL_MS) continue;
+  for (const [viewId, lastSeen] of viewLastSeen) {
+    if (now - lastSeen < VIEW_TTL_MS) continue;
+    const target = viewSessionName(viewId);
     const clients = await run('tmux', ['list-clients', '-t', target, '-F', '#{client_name}']);
-    if (clients.ok && clients.stdout.trim()) continue;
+    if (clients.ok && clients.stdout.trim()) {
+      viewLastSeen.set(viewId, now);
+      continue;
+    }
     await run('tmux', ['kill-session', '-t', target]);
+    viewLastSeen.delete(viewId);
   }
 }
 
@@ -475,7 +456,7 @@ function pageHtml() {
 
     <section class="controls-wrapper">
       <section class="history-panel">
-        <label id="captureLabel" for="capture">Recent output</label>
+        <label for="capture">Recent output</label>
         <pre id="capture"></pre>
       </section>
 
@@ -771,9 +752,6 @@ function pageHtml() {
         : 'tmux: not running';
       if (data.resources) $('resources').textContent = formatResources(data.resources);
       $('capture').textContent = data.capture || '';
-      $('captureLabel').textContent = current
-        ? 'Recent output · #' + current.index + ' ' + (current.name || ('window-' + current.index))
-        : 'Recent output';
       renderTabs(windows);
       $('killPane').disabled = !current || Number(current.panes || 0) < 2;
       $('killPane').title = current && Number(current.panes || 0) >= 2
@@ -1171,5 +1149,5 @@ const cleanupTimer = setInterval(() => {
   cleanupViewSessions().catch((error) => {
     console.error(`view session cleanup failed: ${error.message || error}`);
   });
-}, 60 * 60 * 1000);
+}, 60 * 1000);
 cleanupTimer.unref();
