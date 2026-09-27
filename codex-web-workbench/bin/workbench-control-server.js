@@ -1009,29 +1009,51 @@ async function handle(req, res) {
       const body = await readJson(req);
       const target = await resolveViewSession(requestViewId(url, body));
       const action = String(body.action || '');
+      if (!['live', 'scroll_up', 'scroll_down'].includes(action)) {
+        sendJson(res, 400, { error: 'navigation action not allowed' });
+        return;
+      }
+      const mode = await run('tmux', [
+        'display-message',
+        '-p',
+        '-t',
+        `${target}:.`,
+        '#{alternate_on}\t#{pane_in_mode}',
+      ]);
+      if (!mode.ok) {
+        sendJson(res, 500, { error: mode.stderr || 'could not inspect tmux mode' });
+        return;
+      }
+      const [alternateOn, paneInMode] = mode.stdout.trim().split('\t');
       let result;
       if (action === 'live') {
-        result = await run('tmux', ['copy-mode', '-q', '-t', `${target}:.`]);
+        result = alternateOn === '1'
+          ? await run('tmux', ['send-keys', '-t', `${target}:.`, 'Escape'])
+          : await run('tmux', ['copy-mode', '-q', '-t', `${target}:.`]);
       } else if (action === 'scroll_up' || action === 'scroll_down') {
-        const mode = await run('tmux', ['display-message', '-p', '-t', `${target}:.`, '#{pane_in_mode}']);
-        if (!mode.ok) {
-          sendJson(res, 500, { error: mode.stderr || 'could not inspect tmux mode' });
-          return;
-        }
-        if (mode.stdout.trim() !== '1') {
+        if (alternateOn === '1') {
+          result = await run('tmux', [
+            'send-keys',
+            '-t',
+            `${target}:.`,
+            action === 'scroll_up' ? 'PageUp' : 'PageDown',
+          ]);
+        } else if (paneInMode !== '1') {
           if (action === 'scroll_up') {
-            const entered = await run('tmux', ['copy-mode', '-e', '-t', `${target}:.`]);
-            result = entered.ok
-              ? await run('tmux', [
-                  'send-keys',
-                  '-X',
-                  '-N',
-                  '24',
-                  '-t',
-                  `${target}:.`,
-                  'scroll-up',
-                ])
-              : entered;
+            result = await run('tmux', [
+              'copy-mode',
+              '-e',
+              '-t',
+              `${target}:.`,
+              ';',
+              'send-keys',
+              '-X',
+              '-N',
+              '24',
+              '-t',
+              `${target}:.`,
+              'scroll-up',
+            ]);
           } else {
             result = { ok: true, stderr: '' };
           }
@@ -1046,9 +1068,6 @@ async function handle(req, res) {
             action === 'scroll_up' ? 'scroll-up' : 'scroll-down',
           ]);
         }
-      } else {
-        sendJson(res, 400, { error: 'navigation action not allowed' });
-        return;
       }
       sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.stderr });
       return;
